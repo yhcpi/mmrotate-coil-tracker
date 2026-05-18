@@ -1,5 +1,12 @@
 _base_ = ['../_base_/default_runtime.py']
 
+log_config = dict(
+    interval=5,
+    hooks=[
+        dict(type='TextLoggerHook'),
+        dict(type='TensorboardLoggerHook')
+    ])
+
 angle_version = 'le90'
 
 model = dict(
@@ -31,8 +38,8 @@ model = dict(
         anchor_generator=dict(
             type='RotatedAnchorGenerator',
             octave_base_scale=4,
-            scales_per_octave=1,
-            ratios=[6.0, 7.0, 8.0],
+            scales_per_octave=3,
+            ratios=[7.0],
             strides=[8, 16, 32, 64, 128]),
         bbox_coder=dict(
             type='DeltaXYWHAOBBoxCoder',
@@ -68,7 +75,7 @@ model = dict(
     test_cfg=dict(
         nms_pre=2000,
         min_bbox_size=0,
-        score_thr=0.05,
+        score_thr=0.3,
         nms=dict(iou_thr=0.1),
         max_per_img=2000))
 
