@@ -60,7 +60,7 @@ model = dict(
             loss_type='kld',
             fun='log1p',
             tau=1,
-            loss_weight=0.3)),
+            loss_weight=1.0)),
     train_cfg=dict(
         assigner=dict(
             type='MaxIoUAssigner',
@@ -87,6 +87,7 @@ img_norm_cfg = dict(
 train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True),
+    dict(type='PolyRandomRotate', rotate_ratio=0.5, mode='range', angles_range=10, auto_bound=True),
     dict(type='RResize', img_scale=(640, 640)),
     dict(type='RRandomFlip', flip_ratio=0.5),
     dict(type='Normalize', **img_norm_cfg),
@@ -140,6 +141,6 @@ lr_config = dict(
     warmup_iters=20,
     warmup_ratio=1.0 / 3,
     step=[150, 180])
-runner = dict(type='EpochBasedRunner', max_epochs=200)
+runner = dict(type='EpochBasedRunner', max_epochs=600)
 checkpoint_config = dict(interval=1)
 evaluation = dict(interval=1, metric='mAP')
