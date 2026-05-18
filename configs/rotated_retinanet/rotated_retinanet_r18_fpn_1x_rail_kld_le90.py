@@ -32,7 +32,7 @@ model = dict(
             type='RotatedAnchorGenerator',
             octave_base_scale=4,
             scales_per_octave=1,
-            ratios=[1.0],
+            ratios=[6.0, 7.0, 8.0],
             strides=[8, 16, 32, 64, 128]),
         bbox_coder=dict(
             type='DeltaXYWHAOBBoxCoder',
@@ -73,7 +73,7 @@ model = dict(
         nms=dict(iou_thr=0.1),
         max_per_img=2000))
 
-data_root = 'data/rail/'
+data_root = 'data/'
 
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
@@ -109,19 +109,19 @@ data = dict(
     workers_per_gpu=2,
     train=dict(
         type='RailDataset',
-        ann_file=data_root + 'train/annfiles/',
+        ann_file=data_root + 'train/labels/',
         img_prefix=data_root + 'train/images/',
         pipeline=train_pipeline,
         version=angle_version),
     val=dict(
         type='RailDataset',
-        ann_file=data_root + 'val/annfiles/',
+        ann_file=data_root + 'val/labels/',
         img_prefix=data_root + 'val/images/',
         pipeline=test_pipeline,
         version=angle_version),
     test=dict(
         type='RailDataset',
-        ann_file=data_root + 'test/annfiles/',
+        ann_file=data_root + 'test/labels/',
         img_prefix=data_root + 'test/images/',
         pipeline=test_pipeline,
         version=angle_version))
