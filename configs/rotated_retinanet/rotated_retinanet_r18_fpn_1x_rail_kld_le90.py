@@ -53,14 +53,14 @@ model = dict(
             type='FocalLoss',
             use_sigmoid=True,
             gamma=2.0,
-            alpha=0.25,
+            alpha=0.75,
             loss_weight=1.0),
         loss_bbox=dict(
             type='GDLoss_v1',
             loss_type='kld',
             fun='log1p',
             tau=1,
-            loss_weight=1.0)),
+            loss_weight=0.3)),
     train_cfg=dict(
         assigner=dict(
             type='MaxIoUAssigner',
@@ -73,11 +73,11 @@ model = dict(
         pos_weight=-1,
         debug=False),
     test_cfg=dict(
-        nms_pre=2000,
+        nms_pre=200,
         min_bbox_size=0,
-        score_thr=0.3,
+        score_thr=0.05,
         nms=dict(iou_thr=0.1),
-        max_per_img=2000))
+        max_per_img=50))
 
 data_root = 'data/'
 
