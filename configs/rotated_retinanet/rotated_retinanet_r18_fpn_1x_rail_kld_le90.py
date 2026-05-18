@@ -49,7 +49,6 @@ model = dict(
             alpha=0.25,
             loss_weight=1.0),
         loss_bbox=dict(
-            _delete_=True,
             type='GDLoss_v1',
             loss_type='kld',
             fun='log1p',
@@ -133,7 +132,7 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=20,
     warmup_ratio=1.0 / 3,
-    step=[60, 73])
-runner = dict(type='EpochBasedRunner', max_epochs=80)
+    step=[150, 180])
+runner = dict(type='EpochBasedRunner', max_epochs=200)
 checkpoint_config = dict(interval=1)
 evaluation = dict(interval=1, metric='mAP')
