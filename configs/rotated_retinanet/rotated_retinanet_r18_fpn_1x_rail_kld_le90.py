@@ -1,12 +1,12 @@
-_base_ = [
-    '../_base_/default_runtime.py'
-]
+_base_ = ['../_base_/default_runtime.py']
+
 angle_version = 'le90'
+
 model = dict(
     type='RotatedRetinaNet',
     backbone=dict(
         type='ResNet',
-        depth=18,                       # ResNet18 更轻更快
+        depth=18,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
         frozen_stages=0,
@@ -23,15 +23,16 @@ model = dict(
         num_outs=5),
     bbox_head=dict(
         type='RotatedRetinaHead',
-        num_classes=1,                   # 你的钢轨只有1类
+        num_classes=1,
         in_channels=128,
-        stacked_convs=2,                 # 背景简单，2层卷积足够
+        stacked_convs=2,
         feat_channels=128,
+        reg_decoded_bbox=True,
         anchor_generator=dict(
             type='RotatedAnchorGenerator',
             octave_base_scale=4,
-            scales_per_octave=1,         # 钢轨尺寸固定，1种尺度
-            ratios=[1.0],                # 钢轨比例固定
+            scales_per_octave=1,
+            ratios=[1.0],
             strides=[8, 16, 32, 64, 128]),
         bbox_coder=dict(
             type='DeltaXYWHAOBBoxCoder',
@@ -47,7 +48,13 @@ model = dict(
             gamma=2.0,
             alpha=0.25,
             loss_weight=1.0),
-        loss_bbox=dict(type='L1Loss', loss_weight=1.0)),
+        loss_bbox=dict(
+            _delete_=True,
+            type='GDLoss_v1',
+            loss_type='kld',
+            fun='log1p',
+            tau=1,
+            loss_weight=1.0)),
     train_cfg=dict(
         assigner=dict(
             type='MaxIoUAssigner',
@@ -65,22 +72,23 @@ model = dict(
         score_thr=0.05,
         nms=dict(iou_thr=0.1),
         max_per_img=2000))
-# ===== 数据集配置 =====
+
 data_root = 'data/rail/'
+
 img_norm_cfg = dict(
-    mean=[123.675, 116.28, 103.53],
-    std=[58.395, 57.12, 57.375],
-    to_rgb=True)
+    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+
 train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True),
-    dict(type='RResize', img_scale=(640, 640)),     # 小一点更快
+    dict(type='RResize', img_scale=(640, 640)),
     dict(type='RRandomFlip', flip_ratio=0.5),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='Pad', size_divisor=32),
     dict(type='DefaultFormatBundle'),
     dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])
 ]
+
 test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(
@@ -95,30 +103,37 @@ test_pipeline = [
             dict(type='Collect', keys=['img'])
         ])
 ]
+
 data = dict(
-    samples_per_gpu=8,              # 4060 Ti 16GB → 批次拉到8
+    samples_per_gpu=8,
     workers_per_gpu=2,
     train=dict(
         type='RailDataset',
-        ann_file=data_root + 'train/labels/',
+        ann_file=data_root + 'train/annfiles/',
         img_prefix=data_root + 'train/images/',
         pipeline=train_pipeline,
         version=angle_version),
     val=dict(
         type='RailDataset',
-        ann_file=data_root + 'val/labels/',
+        ann_file=data_root + 'val/annfiles/',
         img_prefix=data_root + 'val/images/',
         pipeline=test_pipeline,
         version=angle_version),
     test=dict(
         type='RailDataset',
-        ann_file=data_root + 'test/labels/',
+        ann_file=data_root + 'test/annfiles/',
         img_prefix=data_root + 'test/images/',
         pipeline=test_pipeline,
         version=angle_version))
-# ===== 训练计划 =====
-optimizer = dict(type='SGD', lr=0.001, momentum=0.9)
-lr_config = dict(policy='step', step=[8, 11])
+
+optimizer = dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0001)
+optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
+lr_config = dict(
+    policy='step',
+    warmup='linear',
+    warmup_iters=500,
+    warmup_ratio=1.0 / 3,
+    step=[8, 11])
 runner = dict(type='EpochBasedRunner', max_epochs=12)
 checkpoint_config = dict(interval=1)
-log_config = dict(interval=50, hooks=[dict(type='TextLoggerHook')])
+evaluation = dict(interval=1, metric='mAP')
