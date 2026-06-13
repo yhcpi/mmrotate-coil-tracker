@@ -68,7 +68,7 @@ model = dict(
         center_sampling=True,  # 启用中心采样：只在中心区域选择正样本
         center_sample_radius=1.5,  # 中心采样半径：1.5倍步长
 
-        norm_on_bbox=False,  # 是否对边界框预测进行归一化：False
+        norm_on_bbox=True,  # 是否对边界框预测进行归一化：True
         centerness_on_reg=True,  # 是否在回归分支上预测centerness：True（推荐做法）
         separate_angle=False,  # 是否分离角度预测：False（角度与其他回归参数一起预测）
         scale_angle=True,  # 是否对角度的scale进行缩放：True
@@ -89,7 +89,7 @@ model = dict(
         # 边界框回归损失配置
         loss_bbox=dict(
             type='GDLoss_v1',  # 广义分布损失v1版本（Generalized Distribution Loss）
-            loss_type='kld',  # 损失类型：KL散度（Kullback-Leibler Divergence）
+            loss_type='gwd',  # 损失类型：GWD（Gaussian Wasserstein Distance）
             fun='log1p',  # 变换函数：log(1+x)，使损失更平滑
             tau=1,  # 温度参数：控制分布的平滑程度
             loss_weight=1.0),  # 回归损失的权重系数
@@ -105,11 +105,11 @@ model = dict(
 
     # 测试配置：推理时的参数
     test_cfg=dict(
-        nms_pre=200,  # NMS（非极大值抑制）前保留的最高分检测框数量：200
+        nms_pre=2000,  # NMS（非极大值抑制）前保留的最高分检测框数量：2000
         min_bbox_size=0,  # 最小边界框尺寸：0（不过滤小目标）
-        score_thr=0.05,  # 置信度阈值：只保留置信度>0.05的检测框
-        nms=dict(iou_thr=0.1),  # NMS的IoU阈值：0.1（较严格，去除重叠框）
-        max_per_img=50))  # 每张图像最多保留的检测框数量：50
+        score_thr=0.1,  # 置信度阈值：只保留置信度>0.1的检测框
+        nms=dict(iou_thr=0.1),  # NMS的IoU阈值：0.1（宽松，保留更多框）
+        max_per_img=100))  # 每张图像最多保留的检测框数量：100
 
 # ============================================================================
 # 数据路径配置
@@ -133,15 +133,22 @@ train_pipeline = [
 
     # 步骤3：多边形随机旋转数据增强
     dict(type='PolyRandomRotate',
-         rotate_ratio=0.5,  # 旋转概率：50%的图像会被旋转
+         rotate_ratio=0.8,  # 旋转概率：80%的图像会被旋转
          mode='range',  # 旋转模式：在指定角度范围内随机旋转
-         angles_range=10,  # 角度范围：±10度
+         angles_range=60,  # 角度范围：±60度
          auto_bound=True),  # 自动调整图像边界以适应旋转
 
-    dict(type='RResize', img_scale=(1600, 900)),  # 步骤4：调整图像尺寸到1600x900
+    dict(type='RResize',
+         img_scale=[(1600, 900)],  # 多尺度候选
+         ratio_range=(0.9, 1.1)),  # 再随机缩放 ±10%
     dict(type='RRandomFlip', flip_ratio=0.5),  # 步骤5：随机翻转，概率50%
-    dict(type='Normalize', **img_norm_cfg),  # 步骤6：图像归一化（减均值除标准差）
-    dict(type='Pad', size_divisor=32),  # 步骤7：填充图像，确保尺寸能被32整除（FPN要求）
+    dict(type='ColorJitter',
+         brightness=0.6, contrast=0.3, saturation=0.6,
+         hue=0, prob=0.8),  # 步骤6：颜色抖动强度加大
+    dict(type='ColorTemperature', delta=0.15, prob=0.8),         # 步骤8：色温调整
+    dict(type='GaussianBlur', kernel_size=5, sigma=(0.1, 0.6), prob=0.5),  # 步骤9：高斯模糊（sigma范围减小）
+    dict(type='Normalize', **img_norm_cfg),  # 步骤10：图像归一化
+    dict(type='Pad', size_divisor=32),  # 步骤11：填充图像
     dict(type='DefaultFormatBundle'),  # 步骤8：将数据打包成默认格式
     dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])  # 步骤9：收集需要的数据字段
 ]
@@ -231,7 +238,7 @@ runner = dict(
 # 检查点配置
 # ============================================================================
 checkpoint_config = dict(
-    interval=1)  # 检查点保存间隔：每1个epoch保存一次模型
+    interval=10)  # 检查点保存间隔：每10个epoch保存一次模型
 
 # ============================================================================
 # 评估配置
