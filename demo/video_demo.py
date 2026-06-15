@@ -270,7 +270,7 @@ requestAnimationFrame(render);
                     with frame_cond:
                         frame_cond.wait(timeout=1.0)
                         buf = latest_frame
-                        frame_id = frame_seq[0] if frame_seq else 0
+                        frame_id = frame_seq[0]
                     if buf is None or frame_id == last_sent_id:
                         continue
                     last_sent_id = frame_id
@@ -453,10 +453,9 @@ class RailCoilDetector:
             self._pending_count = 1
 
         if n > 0:
-            centers = np.array([self._poly_center(p) for p in rail_polys])
-            angles = np.array([self._poly_angle(p) for p in rail_polys])
+            angles = np.arctan2(rail_polys[:, 3] - rail_polys[:, 1],
+                                rail_polys[:, 2] - rail_polys[:, 0])
         else:
-            centers = np.zeros((0, 2))
             angles = np.array([])
 
         committed = self._last_n
@@ -694,27 +693,12 @@ def main():
     model = init_detector(args.config, args.checkpoint, device=args.device)
     model.eval()
 
+    device = next(model.parameters()).device
     # 构建 GPU 加速推理函数，替代每次重新构建 pipeline 的 inference_detector
     fast_infer = build_fast_inference(model, infer_size=args.infer_size)
     detector = RailCoilDetector()
 
-    cap = cv2.VideoCapture(args.video if args.video else 0)
-    if not cap.isOpened():
-        print('错误: 无法打开视频源')
-        return
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f'视频源: {w}x{h} @ {fps:.1f}fps')
-
     obb_roi = None
-    if not args.no_web:
-        server = ThreadingHTTPServer(('0.0.0.0', args.port), MJPEGHandler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        print(f'\n🌐 浏览器: http://localhost:{args.port}/  按 Ctrl+C 停止\n')
-
     if args.roi:
         try:
             parts = args.roi.split(',')
@@ -728,15 +712,32 @@ def main():
                 raise ValueError
         except ValueError:
             print('无效的 --roi 格式，应为 x,y,w,h 或 x,y,w,h,θ_deg')
+            log_f.close()
             return
+
+    cap = cv2.VideoCapture(args.video if args.video else 0)
+    if not cap.isOpened():
+        print('错误: 无法打开视频源')
+        log_f.close()
+        return
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f'视频源: {w}x{h} @ {fps:.1f}fps')
+
+    obb_roi = None
+    if not args.no_web:
+        server = ThreadingHTTPServer(('0.0.0.0', args.port), MJPEGHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f'\n🌐 浏览器: http://localhost:{args.port}/  按 Ctrl+C 停止\n')
+
     elif not args.no_roi:
         obb_roi = select_roi_interactive(cap)
         if obb_roi is None:
             print('未选择 ROI，使用全图')
 
-    roi_mask = None
     aabb = None
-    aabb_mask = None
     obb_filter = None
     obb_outline_pts = None
     if obb_roi is not None:
@@ -749,10 +750,8 @@ def main():
         aabb_w = min(w, int(round(max(xs) - min(xs))))
         aabb_h = min(h, int(round(max(ys) - min(ys))))
         aabb = (aabb_x, aabb_y, aabb_w, aabb_h)
-        aabb_mask = np.ones((aabb_h, aabb_w), dtype=np.uint8) * 255
         aabb_corners = np.array([(c[0] - aabb_x, c[1] - aabb_y) for c in corners],
                                 dtype=np.int32)
-        cv2.fillPoly(aabb_mask, [aabb_corners], 0)
         ct_o, st_o = np.cos(theta), np.sin(theta)
         obb_filter = (cx, cy, ct_o, st_o, rw / 2.0, rh / 2.0)
         obb_outline_pts = aabb_corners.reshape(-1, 1, 2)
@@ -767,19 +766,17 @@ def main():
     display_width = display_width & ~1
     display_height = (int(work_h * display_width / work_w)) & ~1
     if args.output:
+        base, ext = os.path.splitext(args.output)
+        ext = ext.lower()
         for codec in ('mp4v', 'XVID', 'MJPG'):
-            writer = cv2.VideoWriter(args.output, cv2.VideoWriter_fourcc(*codec),
+            path = args.output
+            if codec != 'mp4v' and ext == '.mp4':
+                path = base + '.avi'
+            writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*codec),
                                      fps, (display_width, display_height))
             if writer.isOpened():
                 out = writer
-                ext = os.path.splitext(args.output)[1].lower()
-                if codec != 'mp4v' and ext == '.mp4':
-                    base = os.path.splitext(args.output)[0]
-                    out.release()
-                    args.output = base + '.avi'
-                    writer = cv2.VideoWriter(args.output, cv2.VideoWriter_fourcc(*codec),
-                                             fps, (display_width, display_height))
-                    out = writer
+                args.output = path
                 print(f'输出: {args.output} ({display_width}x{display_height}, codec={codec})')
                 break
             writer.release()
@@ -789,6 +786,9 @@ def main():
     frame_count = 0
     t_start = time.time()
     last_result = None
+    last_polys = np.zeros((0, 8))
+    last_scores = np.array([])
+    last_bboxes = []
     try:
         while True:
             ret, frame = cap.read()
@@ -797,51 +797,52 @@ def main():
 
             if obb_roi is not None:
                 aabb_x, aabb_y, aabb_w, aabb_h = aabb
-                work_frame = frame[aabb_y:aabb_y + aabb_h, aabb_x:aabb_x + aabb_w].copy()
+                work_frame = frame[aabb_y:aabb_y + aabb_h, aabb_x:aabb_x + aabb_w]
             else:
                 work_frame = frame
 
             rail_polys = []
+            bboxes = []
             do_infer = (frame_count % args.skip_frame == 0)
             if do_infer:
                 result = fast_infer(frame)
                 last_result = result
+                polys = np.zeros((0, 8))
+                scores = np.array([])
+                if result is not None:
+                    valid = [torch.as_tensor(d, device=device)
+                             for d in result if d is not None and len(d) > 0]
+                    if valid:
+                        kept_gpu = torch.cat(valid, dim=0)
+                        kept_gpu = kept_gpu[kept_gpu[:, 5] >= args.score_thr]
+                    else:
+                        kept_gpu = None
+                    if kept_gpu is not None and len(kept_gpu) > 0:
+                        if obb_roi is not None:
+                            cx_o, cy_o, ct_o, st_o, hw_o, hh_o = obb_filter
+                            dx = kept_gpu[:, 0] - cx_o
+                            dy = kept_gpu[:, 1] - cy_o
+                            lx = dx * ct_o + dy * st_o
+                            ly = -dx * st_o + dy * ct_o
+                            kept_gpu = kept_gpu[(lx.abs() <= hw_o) & (ly.abs() <= hh_o)]
+                        if len(kept_gpu) > 0:
+                            if obb_roi is not None:
+                                aabb_x_off, aabb_y_off = aabb[0], aabb[1]
+                                kept_gpu[:, 0] -= aabb_x_off
+                                kept_gpu[:, 1] -= aabb_y_off
+                            polys = obb2poly(kept_gpu[:, :5], 'le90').cpu().numpy()
+                            scores = kept_gpu[:, 5].cpu().numpy()
+                            bboxes = kept_gpu[:, :5].cpu().numpy().tolist()
+                last_polys = polys
+                last_scores = scores
+                last_bboxes = bboxes
             else:
-                result = last_result
+                polys = last_polys
+                scores = last_scores
 
-            if result is not None:
-                bboxes, scores = [], []
-                for cls_dets in result:
-                    if cls_dets is None or len(cls_dets) == 0:
-                        continue
-                    for det in cls_dets:
-                        sc = float(det[5])
-                        if sc >= args.score_thr:
-                            bboxes.append(det[:5])
-                            scores.append(sc)
-                if obb_roi is not None and bboxes:
-                    cx_o, cy_o, ct_o, st_o, hw_o, hh_o = obb_filter
-                    keep_b, keep_s = [], []
-                    for bb, sc in zip(bboxes, scores):
-                        dx, dy = bb[0] - cx_o, bb[1] - cy_o
-                        lx = dx * ct_o + dy * st_o
-                        ly = -dx * st_o + dy * ct_o
-                        if abs(lx) <= hw_o and abs(ly) <= hh_o:
-                            keep_b.append(bb)
-                            keep_s.append(sc)
-                    bboxes, scores = keep_b, keep_s
-                if obb_roi is not None:
-                    aabb_x_off, aabb_y_off = aabb[0], aabb[1]
-                    bboxes = [[bb[0] - aabb_x_off, bb[1] - aabb_y_off,
-                               bb[2], bb[3], bb[4]] for bb in bboxes]
-                if bboxes:
-                    polys = obb2poly(
-                        torch.from_numpy(np.array(bboxes, dtype=np.float32)).cuda(),
-                        'le90'
-                    ).cpu().numpy()
-                    for poly, sc in zip(polys, scores):
-                        rail_polys.append(poly)
-                        draw_poly(work_frame, poly, (0, 255, 0), 2, f'rail {sc:.2f}')
+            for poly, sc in zip(polys, scores):
+                rail_polys.append(poly)
+                draw_poly(work_frame, poly, (0, 255, 0), 2, f'rail {sc:.2f}')
 
             rail_polys = np.array(rail_polys) if rail_polys else np.zeros((0, 8))
 
@@ -852,7 +853,10 @@ def main():
                 cmin, cmax = float(perp.min()), float(perp.max())
                 g1 = cmin - detector.ref_min
                 g2 = detector.ref_max - cmax
-                log_f.write(f'DBG|{frame_count}|{state}|rails={detector.rail_count}|gap=[{g1:.0f},{g2:.0f}]|box={len(coil_boxes)}\n')
+                try:
+                    log_f.write(f'DBG|{frame_count}|{state}|rails={detector.rail_count}|gap=[{g1:.0f},{g2:.0f}]|box={len(coil_boxes)}\n')
+                except OSError:
+                    pass
             else:
                 aabb_x_off = aabb_y_off = 0
                 if obb_roi is not None:
@@ -870,24 +874,19 @@ def main():
                 if obb_roi is not None:
                     cx_o, cy_o, w_o, h_o, theta_o = obb_roi
                     obb_info = f'|obb=({cx_o:.0f},{cy_o:.0f},{w_o:.0f}x{h_o:.0f},θ={np.rad2deg(theta_o):.1f}°)|aabb=({aabb_x_off},{aabb_y_off},{aabb[2]}x{aabb[3]})'
-                log_f.write(f'DBG|{frame_count}|{state}|rails={detector.rail_count}|rails_pos={rail_info}{obb_info}\n')
+                try:
+                    log_f.write(f'DBG|{frame_count}|{state}|rails={detector.rail_count}|rails_pos={rail_info}{obb_info}\n')
+                except OSError:
+                    pass
 
             # 顶部状态指示条（任何状态都可见）
-            state_names = {
-                'CLEAR': 'clear', 'HEAD': 'head',
-                'NO_RAILS': 'no rails', 'TAIL': 'tail'}
             state_colors = {
                 'CLEAR': (0, 180, 0), 'HEAD': (0, 180, 230),
                 'NO_RAILS': (0, 0, 230), 'TAIL': (200, 130, 0)}
             bar_color = state_colors.get(state, (100, 100, 100))
             cv2.rectangle(work_frame, (0, 0), (work_w, 4), bar_color, -1)
-            label_text = f'{state_names.get(state, state)} rails:{detector.rail_count}/{detector.max_rails}'
+            label_text = detector.get_state_info()
             cv2.putText(work_frame, label_text, (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, bar_color, 2)
-            # 右下角也显示状态（更显眼）
-            label_w = len(label_text) * 12
-            cv2.rectangle(work_frame, (work_w - label_w - 15, 8), (work_w - 5, 32), (0, 0, 0), -1)
-            cv2.putText(work_frame, label_text, (work_w - label_w - 10, 26),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, bar_color, 2)
 
             # 画钢卷框（加粗到 3px，先填半透明再画边线）
