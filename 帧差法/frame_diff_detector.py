@@ -767,29 +767,50 @@ class FrameDiffCoilDetector:
                 self._post_leave_saw_empty = True
             self._below_enter_count += 1
 
-        # [v7-fix2] False LEAVE recovery: LEAVE 触发后 1s 时, 如果 filled 几乎不变
-        # (≥ LEAVE 时刻的 95%) 或反而上升, 说明 coil 实际还在 (LEAVE 是误触发).
-        # 真正 LEAVE 后 filled 持续下降, 1s 后通常 < LEAVE 时刻的 90% (EMA 衰减).
-        # 假 LEAVE 后 filled 几乎不变或震荡, 1s 后仍 ≥ LEAVE 时刻的 95%.
-        # 数据点: C1 1s后=0.88, C2=0.84, C3=0.89, C4=1.01 → threshold 0.95 可区分.
+        # [v7-fix2] False LEAVE recovery: LEAVE 触发后 2.5s 时, 双信号联合判定:
+        #   filled 几乎不变 (ratio ≥ 0.95) AND consec 没有明显下降趋势
+        # → 假 LEAVE, 强制恢复到 STABLE_COIL, 避免视频末尾 stuck in CHANGE_FALLING.
+        #
+        # 为什么检查点用 2.5s (150 帧) 而非 1s (60 帧)?
+        # - 1s 太短: 真 LEAVE 早期 consec 还没明显下降 (1.mp4 t=67.72 处 1s 后 drops=28, 3.mp4 C4 drops=30),
+        #   单调下降计数无法区分真假 LEAVE (都 ~30).
+        # - 2.5s 足够: 真 LEAVE 后 consec 持续下降 (1.mp4 5s 后 decay=0.72, drops=42);
+        #   假 LEAVE 时 consec 仍在 ~peak 震荡 (3.mp4 C4 5s 后 decay≈1.0, drops≈30).
+        #
+        # 关键判据: consec_decay_ratio = consec_now / consec_at_LEAVE (2.5s 窗口起点)
+        # - 真 LEAVE: decay < 0.85 (consec 衰减 ≥15%)
+        # - 假 LEAVE: decay ≥ 0.95 (consec 几乎不变)
+        # 边界 0.85-0.95 区间: 仍用 filled ratio + decay ratio 联合判定, 鲁棒.
+        #
+        # 数据点:
+        #   3.mp4 C1/C2/C3 ratio=0.88/0.84/0.89, decay≈0.30-0.40 → 真 LEAVE, 不恢复
+        #   3.mp4 C4 ratio=1.01, decay≈1.0 → 假 LEAVE, 恢复
+        #   1.mp4 t=67.72 ratio=0.95 边界 → 2.5s 后 decay=0.90 → 真 LEAVE, 不恢复
         if self._has_emitted_leave and not self.entered:
             self._post_leave_filled_at_leave = getattr(self, '_post_leave_filled_at_leave', 0)
-            # 初次 LEAVE 后记录 filled
+            self._post_leave_consec_at_leave = getattr(self, '_post_leave_consec_at_leave', 0)
+            # 初次 LEAVE 后记录 filled 和 consec
             if self._post_leave_filled_at_leave == 0 and self.event_log and \
                     self.event_log[-1][1] == 'LEAVE' and \
                     self.frame_idx - self.event_log[-1][0] <= 2:
                 self._post_leave_filled_at_leave = filled_smoothed
-            # 1s 后 (60 frames) 检查 filled 是否下降明显
+                self._post_leave_consec_at_leave = self.consec_history[-1] if self.consec_history else 0
+            # 2.5s 后 (150 frames) 双信号联合检查
             self._post_leave_check_count = getattr(self, '_post_leave_check_count', 0) + 1
-            if self._post_leave_filled_at_leave > 0 and self._post_leave_check_count == 60:
+            if self._post_leave_filled_at_leave > 0 and self._post_leave_check_count == 150:
                 ratio = filled_smoothed / self._post_leave_filled_at_leave if self._post_leave_filled_at_leave > 0 else 1.0
-                # 1s 后 filled 仍 ≥ 95% → 假 LEAVE, coil 实际没动
-                if ratio >= 0.95:
+                # 计算 2.5s 区间 consec 衰减率
+                consec_now = self.consec_history[-1] if self.consec_history else 0
+                consec_decay = consec_now / self._post_leave_consec_at_leave if self._post_leave_consec_at_leave > 0 else 1.0
+                # 假 LEAVE 判定 (双信号 AND):
+                #   filled 几乎不变 (ratio ≥ 0.95) AND consec 没下降 (decay ≥ 0.85)
+                is_false_leave = (ratio >= 0.95) and (consec_decay >= 0.85)
+                if is_false_leave:
                     print(f'  [FALSE LEAVE RECOVER @ F{self.frame_idx} t={self.frame_idx/60:.2f} '
-                          f'filled={filled_smoothed:.0f} / leave_filled={self._post_leave_filled_at_leave:.0f} '
-                          f'= {ratio:.2f} (>= 0.95)]')
+                          f'filled_ratio={ratio:.2f}, consec_decay={consec_decay:.2f} (both -> false)]')
                     self._has_emitted_leave = False
                     self._post_leave_filled_at_leave = 0
+                    self._post_leave_consec_at_leave = 0
                     self._post_leave_check_count = 0
                     self._fall_sticky_active = False
                     self._stable_coil_frames = 0
@@ -801,10 +822,12 @@ class FrameDiffCoilDetector:
                 else:
                     # 真正 LEAVE, 重置检查计数 (后续不再触发)
                     self._post_leave_filled_at_leave = 0
+                    self._post_leave_consec_at_leave = 0
                     self._post_leave_check_count = 0
         else:
             self._post_leave_check_count = 0
             self._post_leave_filled_at_leave = 0
+            self._post_leave_consec_at_leave = 0
 
         # max_seen 滚动跟踪: max(max_seen × 0.999, filled)
         if filled_smoothed > 1.0:
